@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>EducaTrace Pro</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@700&display=swap" rel="stylesheet">
+<style>
+    :root { 
+        --primary: #6C63FF; 
+        --secondary: #FF6584; 
+        --success: #48C774; 
+        --bg-grad: linear-gradient(135deg, #f6f8fd 0%, #f1f5f9 100%);
+        --text: #2D3748;
+    }
+    
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Roboto', sans-serif; }
+    
+    body { 
+        height: 100vh; display: flex; flex-direction: column; align-items: center; 
+        background: var(--bg-grad); padding: 15px; overflow: hidden; touch-action: none;
+    }
+
+    h3 { 
+        color: var(--text); margin-bottom: 12px; font-size: 1.6rem; 
+        text-transform: uppercase; letter-spacing: 1px;
+    }
+    
+    h3 span { color: var(--primary); font-size: 2rem; }
+
+    #canvas-container {
+        position: relative; width: 100%; max-width: 380px; flex: 1;
+        background: white; border-radius: 24px; border: 6px solid var(--primary);
+        box-shadow: 0 15px 35px rgba(108, 99, 255, 0.15); overflow: hidden;
+    }
+    
+    canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+
+    #ui { width: 100%; max-width: 400px; margin-top: 20px; display: flex; flex-direction: column; gap: 15px; }
+    .row { display: flex; gap: 10px; justify-content: center; }
+    
+    button {
+        padding: 12px 20px; border: none; border-radius: 14px; font-weight: bold; font-size: 1rem;
+        background: white; color: var(--text); cursor: pointer; transition: all 0.2s ease;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.05);
+    }
+    
+    button:active { transform: translateY(2px); box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+    
+    .btn-clear { background: #FFE3E3; color: #E53E3E; }
+    .btn-brush { background: #E0E7FF; color: #4338CA; }
+
+    #alphabet {
+        display: flex; gap: 10px; overflow-x: auto; padding: 10px 5px;
+        scrollbar-width: none;
+    }
+    #alphabet::-webkit-scrollbar { display: none; }
+    
+    #alphabet button { 
+        min-width: 55px; height: 55px; font-size: 1.5rem; 
+        background: white; border: 2px solid #E2E8F0; color: var(--text);
+        border-radius: 16px; display: flex; align-items: center; justify-content: center;
+    }
+    
+    #alphabet button.active { 
+        background: var(--primary); border-color: var(--primary); 
+        color: white; transform: scale(1.1); box-shadow: 0 8px 15px rgba(108, 99, 255, 0.3);
+    }
+</style>
+</head>
+<body>
+
+<h3>Letra Atual: <span id="next-label">A</span></h3>
+
+<div id="canvas-container">
+    <canvas id="canvas"></canvas>
+</div>
+
+<div id="ui">
+    <div class="row">
+        <button class="btn-brush" onclick="changeBrush(20)">Fino</button>
+        <button class="btn-brush" onclick="changeBrush(35)">Médio</button>
+        <button class="btn-brush" onclick="changeBrush(55)">Grosso</button>
+        <button class="btn-clear" onclick="resetLetter()">Limpar</button>
+    </div>
+    <div id="alphabet"></div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const alphabetEl = document.getElementById('alphabet');
+const nextLabel = document.getElementById('next-label');
+
+const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+let currentLetter = 'A';
+let brushSize = 35;
+let strokes = []; 
+let activeStrokeIndex = 0;
+let activePointIndex = 0;
+let isDrawing = false;
+let audioCtx = null;
+let selectedVoice = null;
+
+const COLOR_HINT = "#F1F5F9"; 
+const COLOR_DONE = "#48C774"; 
+const COLOR_ACTIVE = "#6C63FF"; 
+const COLOR_START = "#34D399"; 
+const COLOR_END = "#FF6584";   
+
+// Hierarquia de vozes: do mais moderno para o fallback
+function loadVoices() {
+    const voices = speechSynthesis.getVoices();
+    selectedVoice =
+        // 1. Neural Multilíngue — mais moderna (Edge moderno)
+        voices.find(v => v.name.includes('ThalitaMultilingual')) ||
+        // 2. Natural Online (Edge, requer conexão)
+        voices.find(v => v.name.includes('Francisca Online (Natural)')) ||
+        voices.find(v => v.name.includes('Antonio Online (Natural)')) ||
+        // 3. Google Neural (Chrome / Android)
+        voices.find(v => v.name === 'Google português do Brasil') ||
+        voices.find(v => v.lang === 'pt-BR' && v.name.includes('Google')) ||
+        // 4. Luciana (Safari / iOS / macOS)
+        voices.find(v => v.name.includes('Luciana')) ||
+        // 5. Qualquer voz pt-BR disponível
+        voices.find(v => v.lang === 'pt-BR');
+}
+speechSynthesis.onvoiceschanged = loadVoices;
+
+function speak(text) {
+    if (!window.speechSynthesis) return;
+    speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text.toLowerCase());
+    if (selectedVoice) utterance.voice = selectedVoice;
+    utterance.lang = 'pt-BR';
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    speechSynthesis.speak(utterance);
+}
+
+function playSound(freq, duration = 0.1) {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start();
+    osc.stop(audioCtx.currentTime + duration);
+}
+
+function getLine(p1, p2, steps = 30) {
+    let pts = [];
+    for(let i=0; i<=steps; i++) pts.push({ x: p1.x + (p2.x-p1.x)*(i/steps), y: p1.y + (p2.y-p1.y)*(i/steps) });
+    return pts;
+}
+
+function getCurve(p1, cp, p2, steps = 40) {
+    let pts = [];
+    for(let i=0; i<=steps; i++) {
+        let t = i/steps;
+        let x = Math.pow(1-t,2)*p1.x + 2*(1-t)*t*cp.x + Math.pow(t,2)*p2.x;
+        let y = Math.pow(1-t,2)*p1.y + 2*(1-t)*t*cp.y + Math.pow(t,2)*p2.y;
+        pts.push({x, y});
+    }
+    return pts;
+}
+
+function getLetterData(l, w, h) {
+    const sX = (v) => (v/100)*w;
+    const sY = (v) => (v/100)*h;
+    const p = (x, y) => ({ x: sX(x), y: sY(y) });
+    let d = [];
+    switch(l) {
+        case 'A': 
+            d.push(getLine(p(50, 15), p(20, 85)), getLine(p(50, 15), p(80, 85)), getLine(p(30, 60), p(70, 60))); 
+            break;
+        case 'B': 
+            d.push(getLine(p(25, 15), p(25, 85)));
+            d.push(getCurve(p(25, 15), p(75, 15), p(80, 32)), getCurve(p(80, 32), p(75, 50), p(25, 50)));
+            d.push(getCurve(p(25, 50), p(85, 50), p(85, 68)), getCurve(p(85, 68), p(80, 85), p(25, 85))); 
+            break;
+        case 'C': 
+            d.push(getCurve(p(80, 20), p(80, 10), p(50, 10)));
+            d.push(getCurve(p(50, 10), p(15, 10), p(15, 50)));
+            d.push(getCurve(p(15, 50), p(15, 90), p(50, 90)));
+            d.push(getCurve(p(50, 90), p(80, 90), p(80, 80)));
+            break;
+        case 'D': 
+            d.push(getLine(p(28, 15), p(28, 85)));
+            d.push(getCurve(p(28, 15), p(85, 15), p(85, 50)), getCurve(p(85, 50), p(85, 85), p(28, 85))); 
+            break;
+        case 'E': 
+            d.push(getLine(p(28, 15), p(28, 85)), getLine(p(28, 15), p(75, 15)), getLine(p(28, 50), p(65, 50)), getLine(p(28, 85), p(75, 85))); 
+            break;
+        case 'F': 
+            d.push(getLine(p(28, 15), p(28, 85)), getLine(p(28, 15), p(75, 15)), getLine(p(28, 50), p(65, 50))); 
+            break;
+        case 'G': 
+            d.push(getCurve(p(80, 25), p(80, 10), p(50, 10)));
+            d.push(getCurve(p(50, 10), p(15, 10), p(15, 50)));
+            d.push(getCurve(p(15, 50), p(15, 90), p(50, 90)));
+            d.push(getCurve(p(50, 90), p(80, 90), p(80, 55)));
+            d.push(getLine(p(80, 55), p(50, 55)));
+            break;
+        case 'H': 
+            d.push(getLine(p(25, 15), p(25, 85)), getLine(p(75, 15), p(75, 85)), getLine(p(25, 50), p(75, 50))); 
+            break;
+        case 'I': 
+            d.push(getLine(p(50, 15), p(50, 85))); 
+            break;
+        case 'J': 
+            d.push(getLine(p(65, 15), p(65, 65)), getCurve(p(65, 65), p(65, 95), p(25, 80))); 
+            break;
+        case 'K': 
+            d.push(getLine(p(28, 15), p(28, 85)), getLine(p(75, 15), p(28, 50)), getLine(p(28, 50), p(75, 85))); 
+            break;
+        case 'L': 
+            d.push(getLine(p(30, 15), p(30, 85)), getLine(p(30, 85), p(75, 85))); 
+            break;
+        case 'M': 
+            d.push(getLine(p(20, 85), p(20, 15)), getLine(p(20, 15), p(50, 60)), getLine(p(50, 60), p(80, 15)), getLine(p(80, 15), p(80, 85))); 
+            break;
+        case 'N': 
+            d.push(getLine(p(25, 85), p(25, 15)), getLine(p(25, 15), p(75, 85)), getLine(p(75, 85), p(75, 15))); 
+            break;
+        case 'O': 
+            d.push(getCurve(p(50, 15), p(85, 15), p(85, 50)));
+            d.push(getCurve(p(85, 50), p(85, 85), p(50, 85)));
+            d.push(getCurve(p(50, 85), p(15, 85), p(15, 50)));
+            d.push(getCurve(p(15, 50), p(15, 15), p(50, 15)));
+            break;
+        case 'P': 
+            d.push(getLine(p(28, 15), p(28, 85)));
+            d.push(getCurve(p(28, 15), p(85, 15), p(85, 32)), getCurve(p(85, 32), p(85, 50), p(28, 50))); 
+            break;
+        case 'Q': 
+            d.push(getCurve(p(50, 15), p(85, 15), p(85, 50)));
+            d.push(getCurve(p(85, 50), p(85, 85), p(50, 85)));
+            d.push(getCurve(p(50, 85), p(15, 85), p(15, 50)));
+            d.push(getCurve(p(15, 50), p(15, 15), p(50, 15)));
+            d.push(getLine(p(60, 60), p(85, 85)));
+            break;
+        case 'R': 
+            d.push(getLine(p(28, 15), p(28, 85)));
+            d.push(getCurve(p(28, 15), p(85, 15), p(85, 32)), getCurve(p(85, 32), p(85, 50), p(28, 50)));
+            d.push(getLine(p(45, 50), p(80, 85))); 
+            break;
+        case 'S':
+            // Arco superior (como um C invertido): direita → topo → esquerda → centro
+            d.push(getCurve(p(78, 28), p(78, 12), p(50, 12)));
+            d.push(getCurve(p(50, 12), p(22, 12), p(22, 38)));
+            d.push(getCurve(p(22, 38), p(22, 50), p(50, 50)));
+            // Arco inferior (como um C normal): centro → direita → base → esquerda
+            d.push(getCurve(p(50, 50), p(78, 50), p(78, 62)));
+            d.push(getCurve(p(78, 62), p(78, 88), p(50, 88)));
+            d.push(getCurve(p(50, 88), p(22, 88), p(22, 72)));
+            break;
+        case 'T': 
+            d.push(getLine(p(20, 15), p(80, 15)), getLine(p(50, 15), p(50, 85))); 
+            break;
+        case 'U': 
+            d.push(getLine(p(25, 15), p(25, 60)), getCurve(p(25, 60), p(25, 90), p(50, 90)), getCurve(p(50, 90), p(75, 90), p(75, 60)), getLine(p(75, 60), p(75, 15))); 
+            break;
+        case 'V': 
+            d.push(getLine(p(20, 15), p(50, 85)), getLine(p(50, 85), p(80, 15))); 
+            break;
+        case 'W': 
+            d.push(getLine(p(15, 15), p(30, 85)), getLine(p(30, 85), p(50, 40)), getLine(p(50, 40), p(70, 85)), getLine(p(70, 85), p(85, 15))); 
+            break;
+        case 'X': 
+            d.push(getLine(p(20, 15), p(80, 85)), getLine(p(80, 15), p(20, 85))); 
+            break;
+        case 'Y': 
+            d.push(getLine(p(20, 15), p(50, 50)), getLine(p(80, 15), p(50, 50)), getLine(p(50, 50), p(50, 85))); 
+            break;
+        case 'Z': 
+            d.push(getLine(p(20, 15), p(80, 15)), getLine(p(80, 15), p(20, 85)), getLine(p(20, 85), p(80, 85))); 
+            break;
+    }
+    return d.map(pts => ({ points: pts, completed: false }));
+}
+
+function drawScene() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    strokes.forEach(s => drawPath(s.points, COLOR_HINT, brushSize));
+    strokes.forEach((s, idx) => {
+        if(s.completed) {
+            drawPath(s.points, COLOR_DONE, brushSize);
+        } else if (idx === activeStrokeIndex) {
+            drawPath(s.points.slice(0, activePointIndex), COLOR_ACTIVE, brushSize);
+            const start = s.points[0];
+            const end = s.points[s.points.length-1];
+            ctx.beginPath();
+            ctx.arc(start.x, start.y, brushSize/1.8, 0, Math.PI*2);
+            ctx.fillStyle = COLOR_START; ctx.fill();
+            ctx.beginPath();
+            ctx.arc(end.x, end.y, brushSize/1.6, 0, Math.PI*2);
+            ctx.lineWidth = 4; ctx.strokeStyle = COLOR_END; ctx.stroke();
+        }
+    });
+}
+
+function drawPath(pts, color, width) {
+    if(pts.length < 2) return;
+    ctx.beginPath();
+    ctx.strokeStyle = color; ctx.lineWidth = width;
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    ctx.moveTo(pts[0].x, pts[0].y);
+    pts.forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.stroke();
+}
+
+function handleInput(e) {
+    if(!isDrawing) return;
+    const rect = canvas.getBoundingClientRect();
+    const touch = e.touches ? e.touches[0] : e;
+    const x = touch.clientX - rect.left;
+    const y = touch.clientY - rect.top;
+    const stroke = strokes[activeStrokeIndex];
+    if(!stroke) return;
+    const target = stroke.points[activePointIndex];
+    if(!target) return;
+
+    const dist = Math.hypot(x - target.x, y - target.y);
+    if(dist < brushSize * 2.2) {
+        activePointIndex += 4; 
+        if(activePointIndex >= stroke.points.length) {
+            stroke.completed = true;
+            activeStrokeIndex++;
+            activePointIndex = 0;
+            playSound(600); 
+            if(activeStrokeIndex >= strokes.length) finish();
+        }
+        drawScene();
+    }
+}
+
+function finish() {
+    isDrawing = false;
+    playSound(1000, 0.3);
+    setTimeout(() => {
+        let currentIndex = LETTERS.indexOf(currentLetter);
+        let nextIndex = (currentIndex + 1) % LETTERS.length;
+        selectLetter(LETTERS[nextIndex]);
+    }, 1200);
+}
+
+function selectLetter(l) {
+    currentLetter = l;
+    nextLabel.textContent = l;
+    document.querySelectorAll('#alphabet button').forEach(x => {
+        x.classList.toggle('active', x.textContent === l);
+    });
+    speak(l);
+    resetLetter();
+}
+
+function resetLetter() {
+    activeStrokeIndex = 0;
+    activePointIndex = 0;
+    isDrawing = false;
+    strokes = getLetterData(currentLetter, canvas.width, canvas.height);
+    drawScene();
+}
+
+function changeBrush(s) { brushSize = s; drawScene(); }
+
+function init() {
+    const r = canvas.parentElement.getBoundingClientRect();
+    canvas.width = r.width;
+    canvas.height = r.height;
+    loadVoices();
+    alphabetEl.innerHTML = "";
+    LETTERS.split("").forEach(l => {
+        const b = document.createElement('button');
+        b.textContent = l;
+        b.onclick = () => selectLetter(l);
+        alphabetEl.appendChild(b);
+    });
+    selectLetter('A');
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+    if (!audioCtx) audioCtx = new AudioContext();
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    const startPt = strokes[activeStrokeIndex]?.points[0];
+    if(startPt && Math.hypot(x - startPt.x, y - startPt.y) < brushSize * 2.8) isDrawing = true;
+});
+
+canvas.addEventListener('pointermove', handleInput);
+window.addEventListener('pointerup', () => isDrawing = false);
+
+window.onload = init;
+window.onresize = init;
+</script>
+</body>
+</html>
